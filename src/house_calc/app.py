@@ -6,14 +6,25 @@ Run with:  streamlit run src/house_calc/app.py
 from __future__ import annotations
 
 import math
+import re
+import sys
+from pathlib import Path
 
-import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
-from pydantic import ValidationError
+# Make `house_calc` importable when the package isn't pip-installed
+# (e.g. on Streamlit Community Cloud).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from house_calc import compare, solve
-from house_calc.models import Buyer, ClosingCosts, Loan, Property, Scenario
+import pandas as pd  # noqa: E402
+import plotly.graph_objects as go  # noqa: E402
+import streamlit as st  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+
+from house_calc import compare, report, solve  # noqa: E402
+from house_calc.models import Scenario  # noqa: E402
+from house_calc.settings import (  # noqa: E402
+    DEFAULTS, MAX_NAME, MAX_NOTES, PlanError, decode_plan, encode_plan, make_plan,
+    plan_from_file, scenario_from_settings,
+)
 
 st.set_page_config(page_title="Home Affordability", layout="wide")
 
@@ -71,18 +82,38 @@ def money(x: float | None, cents: bool = False) -> str:
 
 # --- inputs -----------------------------------------------------------------
 
-DEFAULTS = dict(
-    price=450_000.0, tax=5_400.0, insurance=1_800.0, hoa=0.0, maint_pct=1.0,
-    dp_mode="%", dp_pct=10.0, dp_amt=45_000.0,
-    rate_pct=6.5, term=30, points=0.0, cut_pct=0.25, point_cost_pct=1.0, pmi_pct=0.5,
-    lender_fees=3_500.0, title=2_000.0, appraisal=650.0, inspection=500.0,
-    prepaid_escrow=2_500.0, moving=3_000.0,
-    cash=80_000.0, target=3_200.0, income=12_500.0, debt=600.0, max_dti_pct=36.0, stay=7,
-    hold="percent",
-)
+ss = st.session_state
 for k, v in DEFAULTS.items():
-    st.session_state.setdefault(k, v)
-st.session_state.setdefault("saved", [])
+    ss.setdefault(k, v)
+    # Re-assigning keeps the value alive even while its widget is hidden
+    # (e.g. dp_pct while the down payment is entered in $).
+    ss[k] = ss[k]
+ss.setdefault("saved", [])
+ss.setdefault("plan_name", "")
+ss.setdefault("plan_notes", "")
+
+
+def apply_plan(plan: dict) -> None:
+    """Load a plan into the inputs. Must run before the widgets are drawn
+    (top of script or a widget callback)."""
+    for k, v in plan["settings"].items():
+        ss[k] = v
+    ss.plan_name = plan["name"]
+    ss.plan_notes = plan["notes"]
+    ss.saved = [{"name": e["name"], "inputs": e["inputs"]} for e in plan["saved"]]
+
+
+# A shared link carries the plan in ?plan=...; load it once per browser session.
+if "_url_checked" not in ss:
+    ss._url_checked = True
+    _token = st.query_params.get("plan")
+    if _token:
+        try:
+            _plan = decode_plan(_token)
+            apply_plan(_plan)
+            ss._flash = ("success", f"Opened shared plan: {_plan['name'] or 'untitled'}")
+        except PlanError as err:
+            ss._flash = ("error", f"{err} Showing the default example instead.")
 
 
 def num(label: str, key: str, step: float = 100.0, fmt: str = "%.0f", **kw):
@@ -131,23 +162,25 @@ with st.sidebar:
             help="Tax and insurance scale with price; HOA and closing costs stay fixed.",
         )
 
-ss = st.session_state
-down = ss.price * ss.dp_pct / 100 if ss.dp_mode == "%" else ss.dp_amt
+current = {k: ss[k] for k in DEFAULTS}
+plan = make_plan(current, ss.plan_name, ss.plan_notes, ss.saved)
+token = encode_plan(plan)
+# Keep the address bar in sync: it is always a link to exactly this plan,
+# and refreshing the page keeps your inputs.
+if st.query_params.get("plan") != token:
+    st.query_params["plan"] = token
+try:
+    base_url = (st.context.url or "").split("?")[0]
+except Exception:
+    base_url = ""
+share_url = f"{base_url}?plan={token}" if base_url else ""
+
+if "_flash" in ss:
+    kind, msg = ss.pop("_flash")
+    (st.success if kind == "success" else st.error)(msg)
 
 try:
-    sc = Scenario(
-        property=Property(price=ss.price, annual_property_tax=ss.tax, annual_insurance=ss.insurance,
-                          monthly_hoa=ss.hoa, maintenance_rate=ss.maint_pct / 100),
-        loan=Loan(down_payment=down, base_rate=ss.rate_pct / 100, term_years=ss.term,
-                  points=ss.points, rate_cut_per_point=ss.cut_pct / 100,
-                  point_cost_pct=ss.point_cost_pct / 100, pmi_rate=ss.pmi_pct / 100),
-        closing=ClosingCosts(lender_fees=ss.lender_fees, title=ss.title, appraisal=ss.appraisal,
-                             inspection=ss.inspection, prepaid_escrow=ss.prepaid_escrow,
-                             moving_and_repairs=ss.moving),
-        buyer=Buyer(cash_available=ss.cash, target_monthly_payment=ss.target,
-                    gross_monthly_income=ss.income, other_monthly_debt=ss.debt,
-                    max_dti=ss.max_dti_pct / 100, years_expected_to_stay=ss.stay),
-    )
+    sc = scenario_from_settings(current)
 except ValidationError as e:
     st.title("Home affordability")
     for err in e.errors():
@@ -185,7 +218,7 @@ c4.metric("Affordable price", money(aff.price),
           delta=f"limited by {BINDING[aff.binding]}", delta_color="off")
 
 tabs = st.tabs(["Monthly cost", "Amortisation", "Points", "Rate sensitivity",
-                "Goal-seek", "Points vs down", "Compare"])
+                "Goal-seek", "Points vs down", "Compare", "Save & share"])
 
 # --- monthly breakdown ------------------------------------------------------
 
@@ -408,14 +441,11 @@ with tabs[5]:
 
 # --- saved scenarios --------------------------------------------------------
 
-INPUT_KEYS = list(DEFAULTS)
-
-
 def save_current(name: str) -> None:
     saved = ss.saved
     if len(saved) >= 3:
         saved.pop(0)
-    saved.append({"name": name, "inputs": {k: ss[k] for k in INPUT_KEYS}, "scenario": sc})
+    saved.append({"name": name, "inputs": {k: ss[k] for k in DEFAULTS}})
 
 
 def load(i: int) -> None:
@@ -451,7 +481,7 @@ with tabs[6]:
                 "Affordable price": f"{money(a.price)} ({BINDING[a.binding]})",
             }
 
-        cols = {"Current (unsaved)": summary(sc)} | {e["name"]: summary(e["scenario"]) for e in ss.saved}
+        cols = {"Current (unsaved)": summary(sc)} | {e["name"]: summary(scenario_from_settings(e["inputs"])) for e in ss.saved}
         st.dataframe(pd.DataFrame(cols), width="stretch")
         bcols = st.columns(len(ss.saved))
         for i, (col, e) in enumerate(zip(bcols, ss.saved)):
@@ -459,3 +489,70 @@ with tabs[6]:
                 st.markdown(f"**{e['name']}**")
                 st.button("Load into inputs", key=f"load{i}", on_click=load, args=(i,))
                 st.button("Remove", key=f"rm{i}", on_click=remove, args=(i,))
+
+# --- save & share -----------------------------------------------------------
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def cached_html(token: str, url: str) -> str:
+    return report.render_html(decode_plan(token), url)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def cached_text(token: str, url: str) -> str:
+    return report.render_text(decode_plan(token), url)
+
+
+def load_uploaded() -> None:
+    f = ss.get("plan_file")
+    if f is None:
+        return
+    try:
+        loaded = plan_from_file(f.getvalue())
+        apply_plan(loaded)
+        ss._flash = ("success", f"Opened saved plan: {loaded['name'] or f.name}")
+    except PlanError as err:
+        ss._flash = ("error", str(err))
+
+
+with tabs[7]:
+    st.subheader("Save & share this plan")
+    st.caption("Give your plan a name and notes, then download a summary or share a link. "
+               "Both include everything in the sidebar and any scenarios saved on the "
+               "Compare tab.")
+    st.text_input("Plan name", key="plan_name", max_chars=MAX_NAME,
+                  placeholder="e.g. Oak St, 10% down, 1 point")
+    st.text_area("Notes", key="plan_notes", max_chars=MAX_NOTES, height=110,
+                 placeholder="What you decided and why, questions for the lender, next steps...")
+
+    html_doc = cached_html(token, share_url)
+    slug = re.sub(r"[^a-z0-9]+", "-", (ss.plan_name or "home-plan").lower()).strip("-") or "home-plan"
+
+    d1, d2 = st.columns(2)
+    with d1:
+        st.markdown("**Download a summary**")
+        st.caption("A formatted page with every number. Open it in any browser, print it to PDF, "
+                   "or send it to someone. Upload it below later to reopen the plan.")
+        st.download_button("Download summary", data=html_doc, file_name=f"{slug}.html",
+                           mime="text/html", type="primary", icon=":material/download:",
+                           on_click="ignore")
+    with d2:
+        st.markdown("**Share a link**")
+        if share_url:
+            st.caption("Anyone who opens this link sees exactly this plan. "
+                       "Your browser's address bar always holds this link too.")
+            st.code(share_url, language=None, wrap_lines=True)
+        else:
+            st.caption("Copy the address from your browser's address bar. It always holds "
+                       "a link to exactly this plan.")
+
+    with st.expander("Text summary (to paste into a message or email)"):
+        st.code(cached_text(token, share_url), language=None)
+    with st.expander("Preview the summary"):
+        st.iframe(html_doc, height=900)  # our own generated HTML; user text is escaped
+
+    st.divider()
+    st.markdown("**Open a saved plan**")
+    st.file_uploader("Upload a summary downloaded from this app", type=["html", "json"],
+                     key="plan_file", on_change=load_uploaded, label_visibility="collapsed")
+    st.caption("Opening a plan replaces your current inputs and saved scenarios.")

@@ -214,8 +214,38 @@ Put up to three options side by side. See the next step.
 5. Click **Load into inputs** to bring a saved option back and keep adjusting
    it, or **Remove** to delete it.
 
-⚠️ Saved options are cleared when you refresh or close the browser tab. Jot
-down anything you want to keep.
+#### Save & share: *Keep my plan, or send it to someone*
+See step 7.
+
+### 7. Save and share your plan
+
+Once you've worked out a plan, open the **Save & share** tab.
+
+1. **Name it** (*"Oak St, 10% down, 1 point"*) and add **notes**: what you
+   decided and why, questions for the lender, next steps.
+2. Then share it in whichever way suits:
+   - **Download summary** saves a nicely formatted one-page report: the
+     verdict (over or under budget, enough cash, DTI OK), the key numbers,
+     monthly and closing costs, the loan, cost of owning over your stay,
+     what you can afford, what happens if rates change, any options you
+     compared, your notes, and all your inputs. It opens in any web browser
+     and can be **printed or saved as a PDF**. Email it to a partner, a
+     parent, or your lender.
+   - **Share a link**: anyone who opens it sees the dashboard with exactly
+     your numbers, and can play with them without changing yours.
+   - **Text summary**: a plain-text version with a copy button, for pasting
+     into a text message or email.
+3. **To pick up where you left off**, upload a summary you downloaded under
+   **Open a saved plan**, or just open your link again.
+
+Good to know:
+- Your browser's address bar **always** holds a link to your current plan,
+  so refreshing the page or bookmarking it keeps your numbers.
+- The link and the summary include the options saved on the **Compare** tab
+  too.
+- The app doesn't store your plan anywhere; it lives only in the link and the file. Anyone
+  you give the link or file to can see them, so share with care.
+- Opening a link or summary replaces whatever is currently in the dashboard.
 
 ---
 
@@ -312,6 +342,8 @@ reused:
 - `src/house_calc/models.py`: input models and calculated fields
 - `src/house_calc/solve.py`: goal-seek (works backwards from targets)
 - `src/house_calc/compare.py`: cost of ownership, points vs down, rate sensitivity
+- `src/house_calc/settings.py`: the inputs, and packing a plan into a link or file
+- `src/house_calc/report.py`: the downloadable HTML and text summaries
 - `src/house_calc/app.py`: the Streamlit dashboard
 
 Run the tests with `.venv\Scripts\pytest`. The original design spec is in
